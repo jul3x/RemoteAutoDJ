@@ -1,21 +1,41 @@
 const express = require("express");
-const path = require("path");
 const os = require("os");
+const path = require("path");
 const { execFile } = require("child_process");
 
 const Database = require("better-sqlite3");
 const midi = require("midi");
 
-// ---------------- MIDI: virtual output ----------------
+// ---------------- MIDI: output setup ----------------
 const output = new midi.Output();
 const input = new midi.Input();
-output.openVirtualPort("MixxxWebRemote");
-input.openVirtualPort("MixxxWebRemote");
-console.log("Virtual MIDI port created: MixxxWebRemote");
+const portName = "MixxxWebRemote";
+
+if (os.platform() === 'win32') {
+  // WINDOWS: Look for an existing loopMIDI port
+  let found = false;
+  for (let i = 0; i < output.getPortCount(); i++) {
+    if (output.getPortName(i).includes(portName)) {
+      output.openPort(i);
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    console.error(`❌ ERROR: Could not find loopMIDI port named "${portName}". Please create it in loopMIDI first!`);
+  } else {
+    console.log(`✅ Connected to loopMIDI: ${portName}`);
+  }
+} else {
+  // LINUX/MAC: Create a virtual port natively
+  output.openVirtualPort(portName);
+  input.openVirtualPort(portName);
+  console.log(`✅ Virtual MIDI port created: ${portName}`);
+}
 
 const NOTE_ON = 0x90;
 const NOTE_OFF = 0x80;
-const NOTE_FADE_NOW = 60;  // must match .midi.xml
+const NOTE_FADE_NOW = 60;
 const NOTE_SKIP_NEXT = 61;
 const NOTE_FORWARD = 62;
 const NOTE_BACKWARD = 63;
@@ -28,8 +48,16 @@ function tap(note) {
 }
 
 // ---------------- AutoDJ next track (SQLite) ----------------
-const DB_PATH = path.join(os.homedir(), ".mixxx", "mixxxdb.sqlite");
+let DB_PATH;
+if (os.platform() === 'win32') {
+  DB_PATH = path.join(os.homedir(), "AppData", "Local", "Mixxx", "mixxxdb.sqlite");
+} else {
+  DB_PATH = path.join(os.homedir(), ".mixxx", "mixxxdb.sqlite");
+}
+
+// Initialize the DB variable !!!
 const db = new Database(DB_PATH, { readonly: true });
+console.log(`🗄️  Connected to Mixxx database at: ${DB_PATH}`);
 
 function getAutoDjPlaylistId() {
   const row = db.prepare(`
@@ -127,7 +155,6 @@ app.get("/status", async (_req, res) => {
 const CC = 0xB0;
 const CC_MASTER_GAIN = 0x07;
 
-// value: 0..127
 function sendCC(cc, value) {
   const v = Math.max(0, Math.min(127, value|0));
   output.sendMessage([CC, cc, v]);
@@ -157,7 +184,6 @@ app.get("/", (_req, res) => {
   </style>
 </head>
 <body>
-
   <div class="row">
     <button onclick="fetch('/fade_now')">Transition now</button>
     <button onclick="fetch('/skip_next')">Skip next</button>
@@ -172,18 +198,14 @@ app.get("/", (_req, res) => {
     <button onclick="fetch('/backward2')">Backward</button>
     <button onclick="fetch('/forward2')">Forward</button>
   </div>
-
   <div class="card">
     <div class="row" style="justify-content:space-between;">
       <div style="font-size:18px;"><b>Master volume</b></div>
       <div class="value"><span id="mvText">80</span>/127</div>
     </div>
-
     <input id="mv" type="range" min="0" max="127" value="80" step="1"/>
   </div>
-
   <pre id="out"></pre>
-
 <div class="card">
   <div style="font-size:18px;"><b>AutoDJ queue (next 20)</b></div>
   <table id="qtable" style="width:100%; border-collapse:collapse; margin-top:10px;">
@@ -196,76 +218,133 @@ app.get("/", (_req, res) => {
     </thead>
     <tbody id="qbody"></tbody>
   </table>
+
 </div>
 
+
   <script>
+
     const mv = document.getElementById('mv');
+
     const mvText = document.getElementById('mvText');
+
     let lastSent = -1;
+
     let sendTimer = null;
 
+
     function sendMaster(v) {
+
       // small debounce so we don't spam requests while dragging
+
       if (sendTimer) clearTimeout(sendTimer);
+
       sendTimer = setTimeout(() => fetch('/master/' + v).catch(()=>{}), 25);
+
     }
+
 
     function onMvInput() {
+
       const v = parseInt(mv.value, 10);
+
       mvText.textContent = v;
+
       if (v !== lastSent) {
+
         lastSent = v;
+
         sendMaster(v);
+
       }
+
     }
+
 
   function renderQueue(queue) {
+
     const body = document.getElementById('qbody');
+
     body.innerHTML = "";
 
+
     if (!queue || !queue.ok) {
+
       const tr = document.createElement("tr");
+
       const reason = queue?.reason || "unknown";
+
       tr.innerHTML = '<td colspan="3" style="padding:8px; color:#a00;">Queue unavailable: ' + reason + '</td>r';
+
       body.appendChild(tr);
+
       return;
+
     }
+
 
     const items = queue.items || [];
+
     if (items.length === 0) {
+
       const tr = document.createElement("tr");
+
       tr.innerHTML = '<td colspan="3" style="padding:8px; color:#555;">(empty)</td>';
+
       body.appendChild(tr);
+
       return;
+
     }
+
 
     for (const row of items) {
+
       const tr = document.createElement("tr");
+
       tr.innerHTML = '<td style="padding:6px; border-bottom:1px solid #eee;">' + row.position + '</td>' +
+
         '<td style="padding:6px; border-bottom:1px solid #eee;">' + (row.artist || "") + '</td>' +
+
         '<td style="padding:6px; border-bottom:1px solid #eee;">' + row.title + '</td>';
+
       body.appendChild(tr);
+
     }
+
   }
 
+
     mv.addEventListener('input', onMvInput);
+
     onMvInput(); // apply initial value on page load
 
+
     async function refresh() {
+
       const r = await fetch('/status');
+
       const data = await r.json();
+
       renderQueue(data.queue);
+
     }
+
     setInterval(refresh, 1000);
+
     refresh();
+
   </script>
 
+
 </body>
+
 </html>
+
   `);
-});
+
+}); 
 
 app.listen(8787, () =>
-  console.log("Web remote running: http://localhost:8787/")
+  console.log("🚀 Web remote running: http://localhost:8787/")
 );
-
